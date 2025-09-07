@@ -463,13 +463,15 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 		}
 
 		// Add system labels first, then user labels (system labels take precedence)
-		if c.enableSystemLabels {
+		if c.enableSystemLabels && timeSeries.Metadata != nil && timeSeries.Metadata.SystemLabels != nil {
 			c.addSystemLabels(timeSeries.Metadata.SystemLabels, &labelKeys, &labelValues)
 		}
 
 		// Add user labels
-		for key, value := range timeSeries.Metadata.UserLabels {
-			c.addOrOverrideLabels(&labelKeys, &labelValues, key, value, c.userLabelsOverride)
+		if timeSeries.Metadata != nil && timeSeries.Metadata.UserLabels != nil {
+			for key, value := range timeSeries.Metadata.UserLabels {
+				c.addOrOverrideLabels(&labelKeys, &labelValues, key, value, c.userLabelsOverride)
+			}
 		}
 
 		if c.monitoringDropDelegatedProjects {
