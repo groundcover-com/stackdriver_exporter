@@ -90,7 +90,7 @@ type MonitoringCollectorOptions struct {
 	DescriptorCacheOnlyGoogle bool
 	// EnableSystemLabels decides if system labels from metadata should be added to metrics
 	EnableSystemLabels bool
-	// UserLabelsOverride decides if user labels should override system labels when there are conflicts
+	// UserLabelsOverride decides if user labels should override any conflicting labels
 	UserLabelsOverride bool
 }
 
