@@ -172,3 +172,11 @@ func (d *MetricDeduplicator) Collect(ch chan<- prometheus.Metric) {
 	d.checksTotal.Collect(ch)
 	d.uniqueMetricsGauge.Collect(ch)
 }
+
+func (d *MetricDeduplicator) Reset() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.sentSignatures = make(map[uint64]struct{})
+	d.uniqueMetricsGauge.Set(0)
+}

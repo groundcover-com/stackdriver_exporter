@@ -295,6 +295,8 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 			uniqueDescriptors[descriptor.Type] = descriptor
 		}
 
+		c.deduplicator.Reset()
+
 		errChannel := make(chan error, len(uniqueDescriptors))
 
 		endTime := time.Now().UTC().Add(c.metricsOffset * -1)
