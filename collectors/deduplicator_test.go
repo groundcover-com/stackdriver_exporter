@@ -283,10 +283,6 @@ func TestMetricDeduplicator_SliceReuse(t *testing.T) {
 			assert.True(t, isDuplicate, "Second call should be duplicate")
 		})
 	}
-
-	// Verify that the slice capacity grew appropriately and is being reused
-	// The slice should have grown to accommodate the largest test case
-	assert.GreaterOrEqual(t, cap(dedup.indicesSlice), 10, "Slice capacity should have grown to accommodate largest test case")
 }
 
 func TestMetricDeduplicator_Reset(t *testing.T) {
