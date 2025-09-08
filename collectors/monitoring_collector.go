@@ -554,6 +554,7 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 			if err == nil {
 				timeSeriesMetrics.CollectNewConstHistogram(timeSeries, newestEndTime, labelKeys, dist, buckets, labelValues, timeSeries.MetricKind)
 			} else {
+				c.deduplicator.RevertMark(timeSeries.Metric.Type, labelKeys, labelValues, newestEndTime)
 				c.droppedMetricsTotal.WithLabelValues(
 					"distribution_bucket_error",
 					timeSeries.Metric.Type,
@@ -569,6 +570,7 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 			}
 			continue
 		default:
+			c.deduplicator.RevertMark(timeSeries.Metric.Type, labelKeys, labelValues, newestEndTime)
 			c.droppedMetricsTotal.WithLabelValues(
 				"unknown_value_type",
 				timeSeries.Metric.Type,

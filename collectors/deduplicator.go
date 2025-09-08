@@ -38,6 +38,10 @@ type MetricDeduplicator struct {
 
 // NewMetricDeduplicator creates a new MetricDeduplicator.
 func NewMetricDeduplicator(logger *slog.Logger) *MetricDeduplicator {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	duplicatesTotal := prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "stackdriver",
 		Subsystem: "deduplicator",
@@ -98,6 +102,15 @@ func (d *MetricDeduplicator) CheckAndMark(fqName string, labelKeys, labelValues 
 	d.uniqueMetricsGauge.Set(float64(len(d.sentSignatures)))
 
 	return false // Not a duplicate
+}
+
+func (d *MetricDeduplicator) RevertMark(fqName string, labelKeys, labelValues []string, ts time.Time) {
+	signature := d.hashLabelsTimestamp(fqName, labelKeys, labelValues, ts)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	delete(d.sentSignatures, signature)
+	d.uniqueMetricsGauge.Set(float64(len(d.sentSignatures)))
 }
 
 // ensureIndicesCapacity ensures the indices slice has enough capacity and returns it with the correct length.
