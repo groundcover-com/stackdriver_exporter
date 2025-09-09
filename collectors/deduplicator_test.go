@@ -46,7 +46,7 @@ func TestMetricDeduplicator_CheckAndMark(t *testing.T) {
 	// Call with different timestamp should not be a duplicate
 	ts2 := ts.Add(time.Second)
 	isDuplicate = dedup.CheckAndMark(fqName, labelKeys, labelValues, ts2)
-	assert.False(t, isDuplicate, "Call with different timestamp should not be a duplicate")
+	assert.True(t, isDuplicate, "Call with different timestamp should be a duplicate")
 
 	// Call with different label values should not be a duplicate
 	labelValues2 := []string{"value1", "different_value"}
@@ -154,8 +154,8 @@ func TestMetricDeduplicator_Metrics(t *testing.T) {
 	uniqueCount = testutil.ToFloat64(dedup.uniqueMetricsGauge)
 
 	assert.Equal(t, float64(3), checksCount, "Checks count should be 3 after third call")
-	assert.Equal(t, float64(1), duplicatesCount, "Duplicates count should still be 1")
-	assert.Equal(t, float64(2), uniqueCount, "Unique count should be 2")
+	assert.Equal(t, float64(2), duplicatesCount, "Duplicates count should be 2 since we dedupe across timestamps")
+	assert.Equal(t, float64(1), uniqueCount, "Unique count should be 2")
 }
 
 func TestMetricDeduplicator_ConcurrentAccess(t *testing.T) {

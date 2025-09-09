@@ -87,11 +87,6 @@ func (d *MetricDeduplicator) CheckAndMark(name string, labelKeys, labelValues []
 
 	if _, exists := d.sentSignatures[signature]; exists {
 		d.duplicatesTotal.Inc()
-		d.logger.Debug("duplicate metric detected, dropping",
-			"metric", name,
-			"timestamp", ts.Format(time.RFC3339Nano),
-			"signature", signature,
-		)
 		return true // Duplicate detected - drop it
 	}
 
