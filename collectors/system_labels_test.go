@@ -16,6 +16,7 @@ package collectors
 import (
 	"log/slog"
 	"os"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -528,6 +529,10 @@ func TestMonitoringCollector_AllLabelSources_Integration(t *testing.T) {
 			rawMessage := googleapi.RawMessage(tt.systemLabelsJSON)
 			collector.addSystemLabels(rawMessage, &labelKeys, &labelValues)
 
+			sort.Strings(tt.expectedLabelValues)
+			sort.Strings(labelValues)
+			sort.Strings(tt.expectedLabelKeys)
+			sort.Strings(labelKeys)
 			// Verify the results
 			assert.Equal(t, tt.expectedLabelKeys, labelKeys, "Label keys should match expected")
 			assert.Equal(t, tt.expectedLabelValues, labelValues, "Label values should match expected")
