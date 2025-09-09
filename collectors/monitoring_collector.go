@@ -61,6 +61,10 @@ type MonitoringCollector struct {
 	descriptorCache                 DescriptorCache
 	enableSystemLabels              bool
 	userLabelsOverride              bool
+	deduplicator                    *MetricDeduplicator
+
+	// Metrics for tracking dropped data
+	droppedMetricsTotal *prometheus.CounterVec
 }
 
 type MonitoringCollectorOptions struct {
@@ -192,6 +196,17 @@ func NewMonitoringCollector(projectID string, monitoringService *monitoring.Serv
 		},
 	)
 
+	droppedMetricsTotal := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "dropped_metrics_total",
+			Help:        "Total number of metrics dropped for various reasons.",
+			ConstLabels: prometheus.Labels{"project_id": projectID},
+		},
+		[]string{"reason", "metric_type", "resource_type", "metric_kind", "value_type"},
+	)
+
 	var descriptorCache DescriptorCache
 	if opts.DescriptorCacheTTL == 0 {
 		descriptorCache = &noopDescriptorCache{}
@@ -225,6 +240,8 @@ func NewMonitoringCollector(projectID string, monitoringService *monitoring.Serv
 		descriptorCache:                 descriptorCache,
 		enableSystemLabels:              opts.EnableSystemLabels,
 		userLabelsOverride:              opts.UserLabelsOverride,
+		deduplicator:                    NewMetricDeduplicator(logger),
+		droppedMetricsTotal:             droppedMetricsTotal,
 	}
 
 	return monitoringCollector, nil
@@ -237,6 +254,8 @@ func (c *MonitoringCollector) Describe(ch chan<- *prometheus.Desc) {
 	c.lastScrapeErrorMetric.Describe(ch)
 	c.lastScrapeTimestampMetric.Describe(ch)
 	c.lastScrapeDurationSecondsMetric.Describe(ch)
+	c.droppedMetricsTotal.Describe(ch)
+	c.deduplicator.Describe(ch)
 }
 
 func (c *MonitoringCollector) Collect(ch chan<- prometheus.Metric) {
@@ -263,6 +282,9 @@ func (c *MonitoringCollector) Collect(ch chan<- prometheus.Metric) {
 
 	c.lastScrapeDurationSecondsMetric.Set(time.Since(begun).Seconds())
 	c.lastScrapeDurationSecondsMetric.Collect(ch)
+
+	c.droppedMetricsTotal.Collect(ch)
+	c.deduplicator.Collect(ch)
 }
 
 func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metric, begun time.Time) error {
@@ -282,6 +304,8 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 		for _, descriptor := range descriptors {
 			uniqueDescriptors[descriptor.Type] = descriptor
 		}
+
+		c.deduplicator.Reset()
 
 		errChannel := make(chan error, len(uniqueDescriptors))
 
@@ -476,15 +500,29 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 
 		if c.monitoringDropDelegatedProjects {
 			dropDelegatedProject := false
+			var delegatedProjectID string
 
 			for idx, val := range labelKeys {
 				if val == "project_id" && labelValues[idx] != c.projectID {
 					dropDelegatedProject = true
+					delegatedProjectID = labelValues[idx]
 					break
 				}
 			}
 
 			if dropDelegatedProject {
+				c.droppedMetricsTotal.WithLabelValues(
+					"delegated_project",
+					timeSeries.Metric.Type,
+					timeSeries.Resource.Type,
+					timeSeries.MetricKind,
+					timeSeries.ValueType,
+				).Inc()
+				c.logger.Warn("dropping delegated project metric",
+					"metric", timeSeries.Metric.Type,
+					"resource_type", timeSeries.Resource.Type,
+					"delegated_project_id", delegatedProjectID,
+					"expected_project_id", c.projectID)
 				continue
 			}
 		}
@@ -501,7 +539,24 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 		case "CUMULATIVE":
 			metricValueType = prometheus.CounterValue
 		default:
+			c.droppedMetricsTotal.WithLabelValues(
+				"unknown_metric_kind",
+				timeSeries.Metric.Type,
+				timeSeries.Resource.Type,
+				timeSeries.MetricKind,
+				timeSeries.ValueType,
+			).Inc()
+			c.logger.Warn("dropping metric with unknown kind",
+				"metric", timeSeries.Metric.Type,
+				"resource_type", timeSeries.Resource.Type,
+				"metric_kind", timeSeries.MetricKind,
+				"value_type", timeSeries.ValueType)
 			continue
+		}
+
+		// Check for duplicate metrics using deduplicator
+		if c.deduplicator.CheckAndMark(timeSeries.Metric.Type, labelKeys, labelValues, newestEndTime) {
+			continue // Duplicate detected and logged by deduplicator
 		}
 
 		switch timeSeries.ValueType {
@@ -521,12 +576,35 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 			if err == nil {
 				timeSeriesMetrics.CollectNewConstHistogram(timeSeries, newestEndTime, labelKeys, dist, buckets, labelValues, timeSeries.MetricKind)
 			} else {
-				c.logger.Debug("discarding", "resource", timeSeries.Resource.Type, "metric",
-					timeSeries.Metric.Type, "err", err)
+				c.deduplicator.RevertMark(timeSeries.Metric.Type, labelKeys, labelValues, newestEndTime)
+				c.droppedMetricsTotal.WithLabelValues(
+					"distribution_bucket_error",
+					timeSeries.Metric.Type,
+					timeSeries.Resource.Type,
+					timeSeries.MetricKind,
+					timeSeries.ValueType,
+				).Inc()
+				c.logger.Warn("dropping distribution metric due to bucket error",
+					"metric", timeSeries.Metric.Type,
+					"resource_type", timeSeries.Resource.Type,
+					"metric_kind", timeSeries.MetricKind,
+					"err", err)
 			}
 			continue
 		default:
-			c.logger.Debug("discarding", "value_type", timeSeries.ValueType, "metric", timeSeries)
+			c.deduplicator.RevertMark(timeSeries.Metric.Type, labelKeys, labelValues, newestEndTime)
+			c.droppedMetricsTotal.WithLabelValues(
+				"unknown_value_type",
+				timeSeries.Metric.Type,
+				timeSeries.Resource.Type,
+				timeSeries.MetricKind,
+				timeSeries.ValueType,
+			).Inc()
+			c.logger.Warn("dropping metric with unknown value type",
+				"metric", timeSeries.Metric.Type,
+				"resource_type", timeSeries.Resource.Type,
+				"metric_kind", timeSeries.MetricKind,
+				"value_type", timeSeries.ValueType)
 			continue
 		}
 
