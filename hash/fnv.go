@@ -43,3 +43,13 @@ func AddByte(h uint64, b byte) uint64 {
 	h *= prime64
 	return h
 }
+
+// AddUint64 adds a uint64 as 8 bytes (LSB first) to a fnv64a hash value.
+func AddUint64(h uint64, val uint64) uint64 {
+	for i := 0; i < 8; i++ {
+		h ^= uint64(byte(val))
+		h *= prime64
+		val >>= 8
+	}
+	return h
+}
