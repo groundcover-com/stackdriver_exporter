@@ -23,7 +23,9 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/monitoring/v3"
 
 	"github.com/prometheus-community/stackdriver_exporter/utils"
@@ -57,6 +59,8 @@ type MonitoringCollector struct {
 	histogramStore                  DeltaHistogramStore
 	aggregateDeltas                 bool
 	descriptorCache                 DescriptorCache
+	enableSystemLabels              bool
+	userLabelsOverride              bool
 	deduplicator                    *MetricDeduplicator
 
 	// Metrics for tracking dropped data
@@ -88,6 +92,10 @@ type MonitoringCollectorOptions struct {
 	DescriptorCacheTTL time.Duration
 	// DescriptorCacheOnlyGoogle decides whether only google specific descriptors should be cached or all
 	DescriptorCacheOnlyGoogle bool
+	// EnableSystemLabels decides if system labels from metadata should be added to metrics
+	EnableSystemLabels bool
+	// UserLabelsOverride decides if user labels should override any conflicting labels
+	UserLabelsOverride bool
 }
 
 func isGoogleMetric(name string) bool {
@@ -230,6 +238,8 @@ func NewMonitoringCollector(projectID string, monitoringService *monitoring.Serv
 		histogramStore:                  histogramStore,
 		aggregateDeltas:                 opts.AggregateDeltas,
 		descriptorCache:                 descriptorCache,
+		enableSystemLabels:              opts.EnableSystemLabels,
+		userLabelsOverride:              opts.UserLabelsOverride,
 		deduplicator:                    NewMetricDeduplicator(logger),
 		droppedMetricsTotal:             droppedMetricsTotal,
 	}
@@ -476,6 +486,18 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 			}
 		}
 
+		// Add system labels first, then user labels (system labels take precedence)
+		if c.enableSystemLabels && timeSeries.Metadata != nil && timeSeries.Metadata.SystemLabels != nil {
+			c.addSystemLabels(timeSeries.Metadata.SystemLabels, &labelKeys, &labelValues)
+		}
+
+		// Add user labels
+		if timeSeries.Metadata != nil && timeSeries.Metadata.UserLabels != nil {
+			for key, value := range timeSeries.Metadata.UserLabels {
+				c.addOrOverrideLabels(&labelKeys, &labelValues, key, value, c.userLabelsOverride)
+			}
+		}
+
 		if c.monitoringDropDelegatedProjects {
 			dropDelegatedProject := false
 			var delegatedProjectID string
@@ -651,4 +673,50 @@ func (c *MonitoringCollector) keyExists(labelKeys []string, key string) bool {
 		}
 	}
 	return false
+}
+
+func (c *MonitoringCollector) addSystemLabels(raw googleapi.RawMessage, labelKeys *[]string, labelValues *[]string) {
+	// Early exit for empty, null, or invalid JSON
+	if len(raw) == 0 {
+		return
+	}
+
+	result := gjson.ParseBytes(raw)
+
+	// Early exit if the result is not a valid object or is null/empty
+	if !result.Exists() || !result.IsObject() {
+		return
+	}
+
+	result.ForEach(func(key, value gjson.Result) bool {
+		if !c.keyExists(*labelKeys, key.String()) {
+			*labelKeys = append(*labelKeys, key.String())
+			*labelValues = append(*labelValues, value.String())
+		}
+		return true // continue iteration
+	})
+}
+
+func (c *MonitoringCollector) addOrOverrideLabels(labelKeys *[]string, labelValues *[]string, key string, value string, override bool) {
+	if !c.keyExists(*labelKeys, key) {
+		*labelKeys = append(*labelKeys, key)
+		*labelValues = append(*labelValues, value)
+		return
+	}
+
+	if !override {
+		return
+	}
+
+	// Override the value
+	(*labelValues)[c.findKeyIndex(*labelKeys, key)] = value
+}
+
+func (c *MonitoringCollector) findKeyIndex(labelKeys []string, key string) int {
+	for i, k := range labelKeys {
+		if k == key {
+			return i
+		}
+	}
+	return -1
 }

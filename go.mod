@@ -12,6 +12,7 @@ require (
 	github.com/prometheus/common v0.62.0
 	github.com/prometheus/exporter-toolkit v0.13.2
 	github.com/stretchr/testify v1.10.0
+	github.com/tidwall/gjson v1.18.0
 	golang.org/x/net v0.37.0
 	golang.org/x/oauth2 v0.28.0
 	google.golang.org/api v0.224.0
@@ -46,6 +47,8 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
+	github.com/tidwall/match v1.1.1 // indirect
+	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/xhit/go-str2duration/v2 v2.1.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.59.0 // indirect
