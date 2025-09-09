@@ -240,7 +240,7 @@ func NewMonitoringCollector(projectID string, monitoringService *monitoring.Serv
 		descriptorCache:                 descriptorCache,
 		enableSystemLabels:              opts.EnableSystemLabels,
 		userLabelsOverride:              opts.UserLabelsOverride,
-		deduplicator:                    NewMetricDeduplicator(logger),
+		deduplicator:                    NewMetricDeduplicator(logger, projectID),
 		droppedMetricsTotal:             droppedMetricsTotal,
 	}
 

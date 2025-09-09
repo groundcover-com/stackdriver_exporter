@@ -37,31 +37,31 @@ type MetricDeduplicator struct {
 }
 
 // NewMetricDeduplicator creates a new MetricDeduplicator.
-func NewMetricDeduplicator(logger *slog.Logger) *MetricDeduplicator {
+func NewMetricDeduplicator(logger *slog.Logger, projectID string) *MetricDeduplicator {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	duplicatesTotal := prometheus.NewCounter(prometheus.CounterOpts{
+	duplicatesTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "stackdriver",
 		Subsystem: "deduplicator",
 		Name:      "duplicates_total",
 		Help:      "Total number of duplicate metrics detected and dropped.",
-	})
+	}, []string{"project_id"}).WithLabelValues(projectID)
 
-	checksTotal := prometheus.NewCounter(prometheus.CounterOpts{
+	checksTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "stackdriver",
 		Subsystem: "deduplicator",
 		Name:      "checks_total",
 		Help:      "Total number of deduplication checks performed.",
-	})
+	}, []string{"project_id"}).WithLabelValues(projectID)
 
-	uniqueMetricsGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+	uniqueMetricsGauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "stackdriver",
 		Subsystem: "deduplicator",
 		Name:      "unique_metrics",
 		Help:      "Current number of unique metrics being tracked.",
-	})
+	}, []string{"project_id"}).WithLabelValues(projectID)
 
 	return &MetricDeduplicator{
 		sentSignatures:     make(map[uint64]struct{}),
@@ -74,7 +74,8 @@ func NewMetricDeduplicator(logger *slog.Logger) *MetricDeduplicator {
 
 // CheckAndMark checks if a metric signature has been seen before.
 // If not seen, it marks it as seen and returns false (not a duplicate).
-// If seen before, it returns true (duplicate detected).
+// If seen before, returns true (duplicate detected).
+// We keep the first occurrence and drop all subsequent ones.
 // This method is thread-safe.
 func (d *MetricDeduplicator) CheckAndMark(name string, labelKeys, labelValues []string, ts time.Time) bool {
 	d.mu.Lock()
@@ -82,19 +83,16 @@ func (d *MetricDeduplicator) CheckAndMark(name string, labelKeys, labelValues []
 
 	d.checksTotal.Inc()
 
-	signature := d.hashLabelsTimestamp(name, labelKeys, labelValues, ts)
+	signature := d.hashLabels(name, labelKeys, labelValues)
 
 	if _, exists := d.sentSignatures[signature]; exists {
 		d.duplicatesTotal.Inc()
-
-		// Log duplicate detection at debug level only
-		d.logger.Debug("duplicate metric detected",
+		d.logger.Debug("duplicate metric detected, dropping",
 			"metric", name,
 			"timestamp", ts.Format(time.RFC3339Nano),
 			"signature", signature,
 		)
-
-		return true // Duplicate detected
+		return true // Duplicate detected - drop it
 	}
 
 	d.sentSignatures[signature] = struct{}{} // Mark as seen
@@ -104,7 +102,7 @@ func (d *MetricDeduplicator) CheckAndMark(name string, labelKeys, labelValues []
 }
 
 func (d *MetricDeduplicator) RevertMark(fqName string, labelKeys, labelValues []string, ts time.Time) {
-	signature := d.hashLabelsTimestamp(fqName, labelKeys, labelValues, ts)
+	signature := d.hashLabels(fqName, labelKeys, labelValues)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -112,8 +110,8 @@ func (d *MetricDeduplicator) RevertMark(fqName string, labelKeys, labelValues []
 	d.uniqueMetricsGauge.Set(float64(len(d.sentSignatures)))
 }
 
-// hashLabelsTimestamp calculates a hash based on FQName, sorted labels, and timestamp.
-func (d *MetricDeduplicator) hashLabelsTimestamp(fqName string, labelKeys, labelValues []string, ts time.Time) uint64 {
+// hashLabels calculates a hash based on FQName and sorted labels.
+func (d *MetricDeduplicator) hashLabels(fqName string, labelKeys, labelValues []string) uint64 {
 	h := hash.New()
 	h = hash.Add(h, fqName)
 	h = hash.AddByte(h, hash.SeparatorByte)
@@ -140,10 +138,6 @@ func (d *MetricDeduplicator) hashLabelsTimestamp(fqName string, labelKeys, label
 			h = hash.AddByte(h, hash.SeparatorByte)
 		}
 	}
-
-	// Add timestamp
-	tsNano := ts.UnixNano()
-	h = hash.AddUint64(h, uint64(tsNano))
 
 	return h
 }

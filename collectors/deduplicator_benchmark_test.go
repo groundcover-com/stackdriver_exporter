@@ -17,19 +17,17 @@ import (
 	"log/slog"
 	"os"
 	"testing"
-	"time"
 )
 
-func BenchmarkHashLabelsTimestamp(b *testing.B) {
+func BenchmarkHashLabels(b *testing.B) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	dedup := NewMetricDeduplicator(logger)
-	now := time.Now()
+	dedup := NewMetricDeduplicator(logger, "test_project")
 	fqName := "benchmark_metric"
 	keys := []string{"region", "zone", "instance", "project", "service", "method", "version"}
 	vals := []string{"us-central1", "us-central1-a", "instance-1", "my-project", "api-service", "get", "v1"}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dedup.hashLabelsTimestamp(fqName, keys, vals, now)
+		dedup.hashLabels(fqName, keys, vals)
 	}
 }
