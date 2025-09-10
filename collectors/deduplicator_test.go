@@ -28,7 +28,7 @@ import (
 
 func TestMetricDeduplicator_CheckAndMark(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	dedup := NewMetricDeduplicator(logger)
+	dedup := NewMetricDeduplicator(logger, "test_project")
 
 	fqName := "test_metric"
 	labelKeys := []string{"label1", "label2"}
@@ -46,7 +46,7 @@ func TestMetricDeduplicator_CheckAndMark(t *testing.T) {
 	// Call with different timestamp should not be a duplicate
 	ts2 := ts.Add(time.Second)
 	isDuplicate = dedup.CheckAndMark(fqName, labelKeys, labelValues, ts2)
-	assert.False(t, isDuplicate, "Call with different timestamp should not be a duplicate")
+	assert.True(t, isDuplicate, "Call with different timestamp should be a duplicate")
 
 	// Call with different label values should not be a duplicate
 	labelValues2 := []string{"value1", "different_value"}
@@ -61,7 +61,7 @@ func TestMetricDeduplicator_CheckAndMark(t *testing.T) {
 
 func TestMetricDeduplicator_LabelOrdering(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	dedup := NewMetricDeduplicator(logger)
+	dedup := NewMetricDeduplicator(logger, "test_project")
 
 	fqName := "test_metric"
 	ts := time.Now()
@@ -84,7 +84,7 @@ func TestMetricDeduplicator_LabelOrdering(t *testing.T) {
 
 func TestMetricDeduplicator_EmptyLabels(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	dedup := NewMetricDeduplicator(logger)
+	dedup := NewMetricDeduplicator(logger, "test_project")
 
 	fqName := "test_metric"
 	ts := time.Now()
@@ -103,7 +103,7 @@ func TestMetricDeduplicator_EmptyLabels(t *testing.T) {
 
 func TestMetricDeduplicator_Metrics(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	dedup := NewMetricDeduplicator(logger)
+	dedup := NewMetricDeduplicator(logger, "test_project")
 
 	// Register metrics with a test registry
 	registry := prometheus.NewRegistry()
@@ -154,13 +154,13 @@ func TestMetricDeduplicator_Metrics(t *testing.T) {
 	uniqueCount = testutil.ToFloat64(dedup.uniqueMetricsGauge)
 
 	assert.Equal(t, float64(3), checksCount, "Checks count should be 3 after third call")
-	assert.Equal(t, float64(1), duplicatesCount, "Duplicates count should still be 1")
-	assert.Equal(t, float64(2), uniqueCount, "Unique count should be 2")
+	assert.Equal(t, float64(2), duplicatesCount, "Duplicates count should be 2 since we dedupe across timestamps")
+	assert.Equal(t, float64(1), uniqueCount, "Unique count should be 2")
 }
 
 func TestMetricDeduplicator_ConcurrentAccess(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	dedup := NewMetricDeduplicator(logger)
+	dedup := NewMetricDeduplicator(logger, "test_project")
 
 	const numGoroutines = 10
 	const numCallsPerGoroutine = 100
@@ -210,7 +210,7 @@ func TestMetricDeduplicator_ConcurrentAccess(t *testing.T) {
 
 func TestMetricDeduplicator_PrometheusIntegration(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	dedup := NewMetricDeduplicator(logger)
+	dedup := NewMetricDeduplicator(logger, "test_project")
 
 	// Test Describe method
 	ch := make(chan *prometheus.Desc, 10)
@@ -239,7 +239,7 @@ func TestMetricDeduplicator_PrometheusIntegration(t *testing.T) {
 
 func TestMetricDeduplicator_SliceReuse(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	dedup := NewMetricDeduplicator(logger)
+	dedup := NewMetricDeduplicator(logger, "test_project")
 
 	fqName := "test_metric"
 	ts := time.Now()
@@ -287,7 +287,7 @@ func TestMetricDeduplicator_SliceReuse(t *testing.T) {
 
 func TestMetricDeduplicator_Reset(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	dedup := NewMetricDeduplicator(logger)
+	dedup := NewMetricDeduplicator(logger, "test_project")
 
 	fqName := "test_metric"
 	labelKeys := []string{"label1", "label2"}
@@ -302,10 +302,16 @@ func TestMetricDeduplicator_Reset(t *testing.T) {
 	isDuplicate = dedup.CheckAndMark(fqName, labelKeys, labelValues, ts)
 	assert.True(t, isDuplicate, "Second call should be a duplicate")
 
-	// Add another metric with different timestamp
+	// Add another metric with different timestamp - should still be a duplicate
+	// because we ignore timestamps now
 	ts2 := ts.Add(time.Second)
 	isDuplicate = dedup.CheckAndMark(fqName, labelKeys, labelValues, ts2)
-	assert.False(t, isDuplicate, "Different timestamp should not be a duplicate")
+	assert.True(t, isDuplicate, "Different timestamp with same labels should still be a duplicate")
+
+	// Add a metric with different labels
+	differentLabelValues := []string{"value3", "value4"}
+	isDuplicate = dedup.CheckAndMark(fqName, labelKeys, differentLabelValues, ts)
+	assert.False(t, isDuplicate, "Different labels should not be a duplicate")
 
 	// Verify the unique metrics gauge shows we have 2 unique signatures
 	uniqueCount := testutil.ToFloat64(dedup.uniqueMetricsGauge)
@@ -323,7 +329,10 @@ func TestMetricDeduplicator_Reset(t *testing.T) {
 	assert.False(t, isDuplicate, "After reset, previously seen metric should not be a duplicate")
 
 	isDuplicate = dedup.CheckAndMark(fqName, labelKeys, labelValues, ts2)
-	assert.False(t, isDuplicate, "After reset, previously seen metric with different timestamp should not be a duplicate")
+	assert.True(t, isDuplicate, "Same labels with different timestamp should still be a duplicate")
+
+	isDuplicate = dedup.CheckAndMark(fqName, labelKeys, differentLabelValues, ts)
+	assert.False(t, isDuplicate, "After reset, previously seen metric with different labels should not be a duplicate")
 
 	// But within the same iteration (after reset), duplicates should still be detected
 	isDuplicate = dedup.CheckAndMark(fqName, labelKeys, labelValues, ts)
@@ -336,7 +345,7 @@ func TestMetricDeduplicator_Reset(t *testing.T) {
 
 func TestMetricDeduplicator_ResetBetweenIterations(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	dedup := NewMetricDeduplicator(logger)
+	dedup := NewMetricDeduplicator(logger, "test_project")
 
 	// Simulate multiple scrape iterations with the same metrics
 	fqName := "test_metric"
@@ -418,7 +427,7 @@ func TestMetricDeduplicator_ResetBetweenIterations(t *testing.T) {
 
 func TestMetricDeduplicator_RevertMark(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	dedup := NewMetricDeduplicator(logger)
+	dedup := NewMetricDeduplicator(logger, "test_project")
 
 	fqName := "test_metric"
 	labelKeys := []string{"label1", "label2"}
@@ -455,7 +464,7 @@ func TestMetricDeduplicator_RevertMark(t *testing.T) {
 
 func TestMetricDeduplicator_RevertMarkNonExistent(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	dedup := NewMetricDeduplicator(logger)
+	dedup := NewMetricDeduplicator(logger, "test_project")
 
 	fqName := "nonexistent_metric"
 	labelKeys := []string{"label1"}
@@ -472,7 +481,7 @@ func TestMetricDeduplicator_RevertMarkNonExistent(t *testing.T) {
 
 func TestMetricDeduplicator_RevertMarkConcurrency(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	dedup := NewMetricDeduplicator(logger)
+	dedup := NewMetricDeduplicator(logger, "test_project")
 
 	fqName := "concurrent_metric"
 	labelKeys := []string{"label1"}
