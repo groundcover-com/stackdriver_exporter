@@ -22,13 +22,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus-community/stackdriver_exporter/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/monitoring/v3"
-
-	"github.com/prometheus-community/stackdriver_exporter/utils"
 )
 
 const namespace = "stackdriver"
@@ -555,7 +554,9 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 		}
 
 		// Check for duplicate metrics using deduplicator
-		if c.deduplicator.CheckAndMark(timeSeries.Metric.Type, labelKeys, labelValues, newestEndTime) {
+		// Use the full Prometheus metric name (same as what will be sent to Prometheus)
+		promMetricName := prometheus.BuildFQName(namespace, utils.NormalizeMetricName(timeSeries.Resource.Type), utils.NormalizeMetricName(timeSeries.Metric.Type))
+		if c.deduplicator.CheckAndMark(promMetricName, labelKeys, labelValues, newestEndTime) {
 			continue // Duplicate detected and logged by deduplicator
 		}
 
@@ -576,7 +577,7 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 			if err == nil {
 				timeSeriesMetrics.CollectNewConstHistogram(timeSeries, newestEndTime, labelKeys, dist, buckets, labelValues, timeSeries.MetricKind)
 			} else {
-				c.deduplicator.RevertMark(timeSeries.Metric.Type, labelKeys, labelValues, newestEndTime)
+				c.deduplicator.RevertMark(promMetricName, labelKeys, labelValues, newestEndTime)
 				c.droppedMetricsTotal.WithLabelValues(
 					"distribution_bucket_error",
 					timeSeries.Metric.Type,
@@ -592,7 +593,7 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 			}
 			continue
 		default:
-			c.deduplicator.RevertMark(timeSeries.Metric.Type, labelKeys, labelValues, newestEndTime)
+			c.deduplicator.RevertMark(promMetricName, labelKeys, labelValues, newestEndTime)
 			c.droppedMetricsTotal.WithLabelValues(
 				"unknown_value_type",
 				timeSeries.Metric.Type,
