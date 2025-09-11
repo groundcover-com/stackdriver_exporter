@@ -556,7 +556,7 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 		// Check for duplicate metrics using deduplicator
 		// Use the full Prometheus metric name (same as what will be sent to Prometheus)
 		promMetricName := prometheus.BuildFQName(namespace, utils.NormalizeMetricName(timeSeries.Resource.Type), utils.NormalizeMetricName(timeSeries.Metric.Type))
-		if c.deduplicator.CheckAndMark(promMetricName, labelKeys, labelValues, newestEndTime) {
+		if c.deduplicator.CheckAndMark(promMetricName, labelKeys, labelValues) {
 			continue // Duplicate detected and logged by deduplicator
 		}
 
