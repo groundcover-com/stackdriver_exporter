@@ -77,7 +77,7 @@ func NewMetricDeduplicator(logger *slog.Logger, projectID string) *MetricDedupli
 // If seen before, returns true (duplicate detected).
 // We keep the first occurrence and drop all subsequent ones.
 // This method is thread-safe.
-func (d *MetricDeduplicator) CheckAndMark(name string, labelKeys, labelValues []string, ts time.Time) bool {
+func (d *MetricDeduplicator) CheckAndMark(name string, labelKeys, labelValues []string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
