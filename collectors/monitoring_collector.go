@@ -61,6 +61,7 @@ type MonitoringCollector struct {
 	descriptorCache                 DescriptorCache
 	enableSystemLabels              bool
 	userLabelsOverride              bool
+	timeSeriesListConcurrency       int
 	deduplicator                    *MetricDeduplicator
 
 	// Metrics for tracking dropped data
@@ -96,6 +97,10 @@ type MonitoringCollectorOptions struct {
 	EnableSystemLabels bool
 	// UserLabelsOverride decides if user labels should override any conflicting labels
 	UserLabelsOverride bool
+	// TimeSeriesListConcurrency bounds the number of concurrent projects.timeSeries.list calls
+	// (one per metric descriptor) issued within a single scrape. A value <= 0 means unbounded,
+	// preserving the previous behavior.
+	TimeSeriesListConcurrency int
 }
 
 func isGoogleMetric(name string) bool {
@@ -240,6 +245,7 @@ func NewMonitoringCollector(projectID string, monitoringService *monitoring.Serv
 		descriptorCache:                 descriptorCache,
 		enableSystemLabels:              opts.EnableSystemLabels,
 		userLabelsOverride:              opts.UserLabelsOverride,
+		timeSeriesListConcurrency:       opts.TimeSeriesListConcurrency,
 		deduplicator:                    NewMetricDeduplicator(logger, projectID),
 		droppedMetricsTotal:             droppedMetricsTotal,
 	}
@@ -312,10 +318,21 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 		endTime := time.Now().UTC().Add(c.metricsOffset * -1)
 		startTime := endTime.Add(c.metricsInterval * -1)
 
+		// sem bounds the number of concurrent timeSeries.list fan-out goroutines. A nil channel
+		// (concurrency <= 0) disables the limit, preserving the previous unbounded behavior.
+		var sem chan struct{}
+		if c.timeSeriesListConcurrency > 0 {
+			sem = make(chan struct{}, c.timeSeriesListConcurrency)
+		}
+
 		for _, metricDescriptor := range uniqueDescriptors {
 			wg.Add(1)
 			go func(metricDescriptor *monitoring.MetricDescriptor, ch chan<- prometheus.Metric, startTime, endTime time.Time) {
 				defer wg.Done()
+				if sem != nil {
+					sem <- struct{}{}
+					defer func() { <-sem }()
+				}
 				c.logger.Debug("retrieving Google Stackdriver Monitoring metrics for descriptor", "descriptor", metricDescriptor.Type)
 				filter := fmt.Sprintf("metric.type=\"%s\"", metricDescriptor.Type)
 				if c.monitoringDropDelegatedProjects {
