@@ -294,6 +294,14 @@ func (c *MonitoringCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metric, begun time.Time) error {
+	// sem bounds the number of concurrent timeSeries.list fan-out goroutines across the whole
+	// scrape (all metric-type prefixes and their descriptor batches share it). A nil channel
+	// (concurrency <= 0) disables the limit, preserving the previous unbounded behavior.
+	var sem chan struct{}
+	if c.timeSeriesListConcurrency > 0 {
+		sem = make(chan struct{}, c.timeSeriesListConcurrency)
+	}
+
 	metricDescriptorsFunction := func(descriptors []*monitoring.MetricDescriptor) error {
 		var wg = &sync.WaitGroup{}
 
@@ -317,13 +325,6 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 
 		endTime := time.Now().UTC().Add(c.metricsOffset * -1)
 		startTime := endTime.Add(c.metricsInterval * -1)
-
-		// sem bounds the number of concurrent timeSeries.list fan-out goroutines. A nil channel
-		// (concurrency <= 0) disables the limit, preserving the previous unbounded behavior.
-		var sem chan struct{}
-		if c.timeSeriesListConcurrency > 0 {
-			sem = make(chan struct{}, c.timeSeriesListConcurrency)
-		}
 
 		for _, metricDescriptor := range uniqueDescriptors {
 			wg.Add(1)

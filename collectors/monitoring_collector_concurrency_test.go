@@ -45,7 +45,11 @@ func (noopHistogramStore) ListMetrics(string) []*HistogramMetric                
 // TestReportMonitoringMetrics_TimeSeriesListConcurrency verifies that the inner
 // projects.timeSeries.list fan-out is bounded by TimeSeriesListConcurrency.
 func TestReportMonitoringMetrics_TimeSeriesListConcurrency(t *testing.T) {
-	const numDescriptors = 8
+	// Two prefixes fan out concurrently. With a scrape-wide limiter, total in-flight
+	// timeSeries.list calls must stay <= limit; a per-prefix limiter would allow up to
+	// limit*len(prefixes), so this guards against the semaphore leaking per prefix.
+	prefixes := []string{"compute.googleapis.com", "storage.googleapis.com"}
+	const descriptorsPerPrefix = 8
 	const limit = 2
 
 	var inFlight, maxInFlight, total int64
@@ -53,13 +57,23 @@ func TestReportMonitoringMetrics_TimeSeriesListConcurrency(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/metricDescriptors"):
+			// Namespace descriptor types by the requested prefix so each prefix batch is
+			// distinct (dedup happens per type) and produces its own timeSeries.list calls.
+			filter := r.URL.Query().Get("filter")
+			prefix := filter
+			if i := strings.Index(filter, `starts_with("`); i >= 0 {
+				rest := filter[i+len(`starts_with("`):]
+				if j := strings.Index(rest, `"`); j >= 0 {
+					prefix = rest[:j]
+				}
+			}
 			var sb strings.Builder
 			sb.WriteString(`{"metricDescriptors":[`)
-			for i := 0; i < numDescriptors; i++ {
+			for i := 0; i < descriptorsPerPrefix; i++ {
 				if i > 0 {
 					sb.WriteString(",")
 				}
-				fmt.Fprintf(&sb, `{"type":"compute.googleapis.com/m%d","metricKind":"GAUGE","valueType":"DOUBLE"}`, i)
+				fmt.Fprintf(&sb, `{"type":"%s/m%d","metricKind":"GAUGE","valueType":"DOUBLE"}`, prefix, i)
 			}
 			sb.WriteString(`]}`)
 			w.Write([]byte(sb.String()))
@@ -89,7 +103,7 @@ func TestReportMonitoringMetrics_TimeSeriesListConcurrency(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	collector, err := NewMonitoringCollector("test-project", svc, MonitoringCollectorOptions{
-		MetricTypePrefixes:        []string{"compute.googleapis.com"},
+		MetricTypePrefixes:        prefixes,
 		RequestInterval:           time.Minute,
 		TimeSeriesListConcurrency: limit,
 	}, logger, noopCounterStore{}, noopHistogramStore{})
@@ -108,6 +122,6 @@ func TestReportMonitoringMetrics_TimeSeriesListConcurrency(t *testing.T) {
 	close(ch)
 	drain.Wait()
 
-	require.Equal(t, int64(numDescriptors), atomic.LoadInt64(&total), "every descriptor should be queried")
+	require.Equal(t, int64(descriptorsPerPrefix*len(prefixes)), atomic.LoadInt64(&total), "every descriptor should be queried")
 	require.LessOrEqual(t, atomic.LoadInt64(&maxInFlight), int64(limit), "concurrent timeSeries.list calls must not exceed the limit")
 }
