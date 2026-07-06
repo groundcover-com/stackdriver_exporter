@@ -125,3 +125,85 @@ func TestReportMonitoringMetrics_TimeSeriesListConcurrency(t *testing.T) {
 	require.Equal(t, int64(descriptorsPerPrefix*len(prefixes)), atomic.LoadInt64(&total), "every descriptor should be queried")
 	require.LessOrEqual(t, atomic.LoadInt64(&maxInFlight), int64(limit), "concurrent timeSeries.list calls must not exceed the limit")
 }
+
+// TestReportMonitoringMetrics_TimeSeriesListRate verifies that the token-bucket rate limiter
+// spreads projects.timeSeries.list calls over time scrape-wide. With burst=Count the first Count
+// calls fire immediately and the rest are paced at Count/Duration, so the scrape cannot complete
+// faster than that pacing allows — proving rate (not just concurrency) is bounded.
+func TestReportMonitoringMetrics_TimeSeriesListRate(t *testing.T) {
+	prefixes := []string{"compute.googleapis.com", "storage.googleapis.com"}
+	const descriptorsPerPrefix = 8
+	const rateCount = 2
+	const rateDuration = 100 * time.Millisecond // 20 calls/sec, burst 2
+
+	var total int64
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/metricDescriptors"):
+			filter := r.URL.Query().Get("filter")
+			prefix := filter
+			if i := strings.Index(filter, `starts_with("`); i >= 0 {
+				rest := filter[i+len(`starts_with("`):]
+				if j := strings.Index(rest, `"`); j >= 0 {
+					prefix = rest[:j]
+				}
+			}
+			var sb strings.Builder
+			sb.WriteString(`{"metricDescriptors":[`)
+			for i := 0; i < descriptorsPerPrefix; i++ {
+				if i > 0 {
+					sb.WriteString(",")
+				}
+				fmt.Fprintf(&sb, `{"type":"%s/m%d","metricKind":"GAUGE","valueType":"DOUBLE"}`, prefix, i)
+			}
+			sb.WriteString(`]}`)
+			w.Write([]byte(sb.String()))
+		case strings.HasSuffix(r.URL.Path, "/timeSeries"):
+			atomic.AddInt64(&total, 1)
+			w.Write([]byte(`{}`))
+		default:
+			w.Write([]byte(`{}`))
+		}
+	}))
+	defer server.Close()
+
+	svc, err := monitoring.NewService(context.Background(),
+		option.WithEndpoint(server.URL),
+		option.WithoutAuthentication(),
+		option.WithHTTPClient(server.Client()))
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	collector, err := NewMonitoringCollector("test-project", svc, MonitoringCollectorOptions{
+		MetricTypePrefixes:         prefixes,
+		RequestInterval:            time.Minute,
+		TimeSeriesListRateCount:    rateCount,
+		TimeSeriesListRateDuration: rateDuration,
+	}, logger, noopCounterStore{}, noopHistogramStore{})
+	require.NoError(t, err)
+
+	ch := make(chan prometheus.Metric, 1024)
+	var drain sync.WaitGroup
+	drain.Add(1)
+	go func() {
+		defer drain.Done()
+		for range ch {
+		}
+	}()
+
+	start := time.Now()
+	require.NoError(t, collector.reportMonitoringMetrics(ch, time.Now()))
+	elapsed := time.Since(start)
+	close(ch)
+	drain.Wait()
+
+	numCalls := descriptorsPerPrefix * len(prefixes)
+	// After the initial burst of rateCount, the remaining calls are paced at rateCount/rateDuration.
+	ratePerSecond := float64(rateCount) / rateDuration.Seconds()
+	minExpected := time.Duration(float64(numCalls-rateCount) / ratePerSecond * float64(time.Second))
+
+	require.Equal(t, int64(numCalls), atomic.LoadInt64(&total), "every descriptor should be queried")
+	// Allow slack below the theoretical minimum for scheduling jitter.
+	require.GreaterOrEqual(t, elapsed, minExpected*8/10, "rate limiter must spread calls over time")
+}

@@ -25,6 +25,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
+	"golang.org/x/time/rate"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/monitoring/v3"
 
@@ -62,6 +63,7 @@ type MonitoringCollector struct {
 	enableSystemLabels              bool
 	userLabelsOverride              bool
 	timeSeriesListConcurrency       int
+	timeSeriesListRate              *rate.Limiter
 	deduplicator                    *MetricDeduplicator
 
 	// Metrics for tracking dropped data
@@ -101,6 +103,13 @@ type MonitoringCollectorOptions struct {
 	// (one per metric descriptor) issued within a single scrape. A value <= 0 means unbounded,
 	// preserving the previous behavior.
 	TimeSeriesListConcurrency int
+	// TimeSeriesListRateCount / TimeSeriesListRateDuration bound the *rate* of
+	// projects.timeSeries.list calls to Count calls per Duration (a token bucket with burst =
+	// Count). Both must be > 0 to enable; otherwise no rate limiting is applied. This smooths the
+	// fan-out burst that trips GCP per-second soft-throttling, complementing (and independent of)
+	// TimeSeriesListConcurrency.
+	TimeSeriesListRateCount    int
+	TimeSeriesListRateDuration time.Duration
 }
 
 func isGoogleMetric(name string) bool {
@@ -212,6 +221,12 @@ func NewMonitoringCollector(projectID string, monitoringService *monitoring.Serv
 		[]string{"reason", "metric_type", "resource_type", "metric_kind", "value_type"},
 	)
 
+	var timeSeriesListRate *rate.Limiter
+	if opts.TimeSeriesListRateCount > 0 && opts.TimeSeriesListRateDuration > 0 {
+		ratePerSecond := float64(opts.TimeSeriesListRateCount) / opts.TimeSeriesListRateDuration.Seconds()
+		timeSeriesListRate = rate.NewLimiter(rate.Limit(ratePerSecond), opts.TimeSeriesListRateCount)
+	}
+
 	var descriptorCache DescriptorCache
 	if opts.DescriptorCacheTTL == 0 {
 		descriptorCache = &noopDescriptorCache{}
@@ -246,6 +261,7 @@ func NewMonitoringCollector(projectID string, monitoringService *monitoring.Serv
 		enableSystemLabels:              opts.EnableSystemLabels,
 		userLabelsOverride:              opts.UserLabelsOverride,
 		timeSeriesListConcurrency:       opts.TimeSeriesListConcurrency,
+		timeSeriesListRate:              timeSeriesListRate,
 		deduplicator:                    NewMetricDeduplicator(logger, projectID),
 		droppedMetricsTotal:             droppedMetricsTotal,
 	}
@@ -302,7 +318,7 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 		sem = make(chan struct{}, c.timeSeriesListConcurrency)
 	}
 
-	metricDescriptorsFunction := func(descriptors []*monitoring.MetricDescriptor) error {
+	metricDescriptorsFunction := func(ctx context.Context, descriptors []*monitoring.MetricDescriptor) error {
 		var wg = &sync.WaitGroup{}
 
 		// It has been noticed that the same metric descriptor can be obtained from different GCP
@@ -328,7 +344,7 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 
 		for _, metricDescriptor := range uniqueDescriptors {
 			wg.Add(1)
-			go func(metricDescriptor *monitoring.MetricDescriptor, ch chan<- prometheus.Metric, startTime, endTime time.Time) {
+			go func(ctx context.Context, metricDescriptor *monitoring.MetricDescriptor, ch chan<- prometheus.Metric, startTime, endTime time.Time) {
 				defer wg.Done()
 				if sem != nil {
 					sem <- struct{}{}
@@ -372,6 +388,13 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 					IntervalEndTime(endTime.Format(time.RFC3339Nano))
 
 				for {
+					if c.timeSeriesListRate != nil {
+						if err := c.timeSeriesListRate.Wait(ctx); err != nil {
+							c.logger.Error("rate limiter wait failed for descriptor", "descriptor", metricDescriptor.Type, "err", err)
+							errChannel <- err
+							break
+						}
+					}
 					c.apiCallsTotalMetric.Inc()
 					page, err := timeSeriesListCall.Do()
 					if err != nil {
@@ -392,7 +415,7 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 					}
 					timeSeriesListCall.PageToken(page.NextPageToken)
 				}
-			}(metricDescriptor, ch, startTime, endTime)
+			}(ctx, metricDescriptor, ch, startTime, endTime)
 		}
 
 		wg.Wait()
@@ -420,7 +443,7 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 
 			if cached := c.descriptorCache.Lookup(metricsTypePrefix); cached != nil {
 				c.logger.Debug("using cached Google Stackdriver Monitoring metric descriptors starting with", "prefix", metricsTypePrefix)
-				if err := metricDescriptorsFunction(cached); err != nil {
+				if err := metricDescriptorsFunction(ctx, cached); err != nil {
 					errChannel <- err
 				}
 			} else {
@@ -429,7 +452,7 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 				callback := func(r *monitoring.ListMetricDescriptorsResponse) error {
 					c.apiCallsTotalMetric.Inc()
 					cache = append(cache, r.MetricDescriptors...)
-					return metricDescriptorsFunction(r.MetricDescriptors)
+					return metricDescriptorsFunction(ctx, r.MetricDescriptors)
 				}
 
 				c.logger.Debug("listing Google Stackdriver Monitoring metric descriptors starting with", "prefix", metricsTypePrefix)
