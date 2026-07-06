@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/monitoring/v3"
 	"google.golang.org/api/option"
@@ -206,4 +207,8 @@ func TestReportMonitoringMetrics_TimeSeriesListRate(t *testing.T) {
 	require.Equal(t, int64(numCalls), atomic.LoadInt64(&total), "every descriptor should be queried")
 	// Allow slack below the theoretical minimum for scheduling jitter.
 	require.GreaterOrEqual(t, elapsed, minExpected*8/10, "rate limiter must spread calls over time")
+
+	// The initial burst (rateCount) is admitted immediately; everything after is throttled.
+	require.Equal(t, float64(rateCount), testutil.ToFloat64(collector.timeSeriesListRateAllowedMetric), "burst calls should be counted as allowed")
+	require.Equal(t, float64(numCalls-rateCount), testutil.ToFloat64(collector.timeSeriesListRateWaitedMetric), "throttled calls should be counted as waited")
 }

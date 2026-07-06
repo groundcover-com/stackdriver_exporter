@@ -64,6 +64,8 @@ type MonitoringCollector struct {
 	userLabelsOverride              bool
 	timeSeriesListConcurrency       int
 	timeSeriesListRate              *rate.Limiter
+	timeSeriesListRateAllowedMetric prometheus.Counter
+	timeSeriesListRateWaitedMetric  prometheus.Counter
 	deduplicator                    *MetricDeduplicator
 
 	// Metrics for tracking dropped data
@@ -156,6 +158,26 @@ func NewMonitoringCollector(projectID string, monitoringService *monitoring.Serv
 			Subsystem:   subsystem,
 			Name:        "api_calls_total",
 			Help:        "Total number of Google Stackdriver Monitoring API calls made.",
+			ConstLabels: prometheus.Labels{"project_id": projectID},
+		},
+	)
+
+	timeSeriesListRateAllowedMetric := prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "time_series_list_rate_allowed_total",
+			Help:        "Total number of projects.timeSeries.list calls admitted immediately by the rate limiter.",
+			ConstLabels: prometheus.Labels{"project_id": projectID},
+		},
+	)
+
+	timeSeriesListRateWaitedMetric := prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "time_series_list_rate_waited_total",
+			Help:        "Total number of projects.timeSeries.list calls delayed by the rate limiter (throttled).",
 			ConstLabels: prometheus.Labels{"project_id": projectID},
 		},
 	)
@@ -262,6 +284,8 @@ func NewMonitoringCollector(projectID string, monitoringService *monitoring.Serv
 		userLabelsOverride:              opts.UserLabelsOverride,
 		timeSeriesListConcurrency:       opts.TimeSeriesListConcurrency,
 		timeSeriesListRate:              timeSeriesListRate,
+		timeSeriesListRateAllowedMetric: timeSeriesListRateAllowedMetric,
+		timeSeriesListRateWaitedMetric:  timeSeriesListRateWaitedMetric,
 		deduplicator:                    NewMetricDeduplicator(logger, projectID),
 		droppedMetricsTotal:             droppedMetricsTotal,
 	}
@@ -271,6 +295,8 @@ func NewMonitoringCollector(projectID string, monitoringService *monitoring.Serv
 
 func (c *MonitoringCollector) Describe(ch chan<- *prometheus.Desc) {
 	c.apiCallsTotalMetric.Describe(ch)
+	c.timeSeriesListRateAllowedMetric.Describe(ch)
+	c.timeSeriesListRateWaitedMetric.Describe(ch)
 	c.scrapesTotalMetric.Describe(ch)
 	c.scrapeErrorsTotalMetric.Describe(ch)
 	c.lastScrapeErrorMetric.Describe(ch)
@@ -292,6 +318,8 @@ func (c *MonitoringCollector) Collect(ch chan<- prometheus.Metric) {
 	c.scrapeErrorsTotalMetric.Collect(ch)
 
 	c.apiCallsTotalMetric.Collect(ch)
+	c.timeSeriesListRateAllowedMetric.Collect(ch)
+	c.timeSeriesListRateWaitedMetric.Collect(ch)
 
 	c.scrapesTotalMetric.Inc()
 	c.scrapesTotalMetric.Collect(ch)
@@ -389,10 +417,15 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 
 				for {
 					if c.timeSeriesListRate != nil {
-						if err := c.timeSeriesListRate.Wait(ctx); err != nil {
-							c.logger.Error("rate limiter wait failed for descriptor", "descriptor", metricDescriptor.Type, "err", err)
-							errChannel <- err
-							break
+						if c.timeSeriesListRate.Allow() {
+							c.timeSeriesListRateAllowedMetric.Inc()
+						} else {
+							c.timeSeriesListRateWaitedMetric.Inc()
+							if err := c.timeSeriesListRate.Wait(ctx); err != nil {
+								c.logger.Error("rate limiter wait failed for descriptor", "descriptor", metricDescriptor.Type, "err", err)
+								errChannel <- err
+								break
+							}
 						}
 					}
 					c.apiCallsTotalMetric.Inc()
