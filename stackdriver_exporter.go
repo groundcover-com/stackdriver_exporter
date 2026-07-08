@@ -113,6 +113,10 @@ var (
 		"monitoring.metrics-ingest-delay", "Offset for the Google Stackdriver Monitoring Metrics interval into the past by the ingest delay from the metric's metadata.",
 	).Default("false").Bool()
 
+	monitoringMetricsReturnAllPoints = kingpin.Flag(
+		"monitoring.metrics-return-all-points", "Return all data points in the requested interval (each stamped with its own end time) instead of only the most recent one.",
+	).Default("false").Bool()
+
 	collectorFillMissingLabels = kingpin.Flag(
 		"collector.fill-missing-labels", "Fill missing metrics labels with empty string to avoid label dimensions inconsistent failure.",
 	).Default("true").Bool()
@@ -255,6 +259,7 @@ func (h *handler) getCollector(project string, filters map[string]bool) (*collec
 		AggregateDeltas:           *monitoringMetricsAggregateDeltas,
 		DescriptorCacheTTL:        *monitoringDescriptorCacheTTL,
 		DescriptorCacheOnlyGoogle: *monitoringDescriptorCacheOnlyGoogle,
+		ReturnAllPoints:           *monitoringMetricsReturnAllPoints,
 	}, h.logger, delta.NewInMemoryCounterStore(h.logger, *monitoringMetricsDeltasTTL), delta.NewInMemoryHistogramStore(h.logger, *monitoringMetricsDeltasTTL))
 	if err != nil {
 		return nil, err

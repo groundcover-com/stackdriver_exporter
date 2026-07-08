@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"testing"
+	"time"
 )
 
 func BenchmarkHashLabels(b *testing.B) {
@@ -28,6 +29,6 @@ func BenchmarkHashLabels(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dedup.hashLabels(fqName, keys, vals)
+		dedup.hashLabels(fqName, keys, vals, time.Time{})
 	}
 }

@@ -30,6 +30,10 @@ type MetricDeduplicator struct {
 	sentSignatures map[uint64]struct{}
 	logger         *slog.Logger
 
+	// includeTimestamp mixes the point end time into the signature. Needed in return-all-points mode
+	// where multiple points of the same series share labels and differ only by timestamp.
+	includeTimestamp bool
+
 	// Prometheus metrics
 	duplicatesTotal    prometheus.Counter
 	checksTotal        prometheus.Counter
@@ -83,7 +87,7 @@ func (d *MetricDeduplicator) CheckAndMark(name string, labelKeys, labelValues []
 
 	d.checksTotal.Inc()
 
-	signature := d.hashLabels(name, labelKeys, labelValues)
+	signature := d.hashLabels(name, labelKeys, labelValues, ts)
 
 	if _, exists := d.sentSignatures[signature]; exists {
 		d.duplicatesTotal.Inc()
@@ -97,7 +101,7 @@ func (d *MetricDeduplicator) CheckAndMark(name string, labelKeys, labelValues []
 }
 
 func (d *MetricDeduplicator) RevertMark(fqName string, labelKeys, labelValues []string, ts time.Time) {
-	signature := d.hashLabels(fqName, labelKeys, labelValues)
+	signature := d.hashLabels(fqName, labelKeys, labelValues, ts)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -106,10 +110,15 @@ func (d *MetricDeduplicator) RevertMark(fqName string, labelKeys, labelValues []
 }
 
 // hashLabels calculates a hash based on FQName and sorted labels.
-func (d *MetricDeduplicator) hashLabels(fqName string, labelKeys, labelValues []string) uint64 {
+func (d *MetricDeduplicator) hashLabels(fqName string, labelKeys, labelValues []string, ts time.Time) uint64 {
 	h := hash.New()
 	h = hash.Add(h, fqName)
 	h = hash.AddByte(h, hash.SeparatorByte)
+
+	if d.includeTimestamp {
+		h = hash.Add(h, ts.Format(time.RFC3339Nano))
+		h = hash.AddByte(h, hash.SeparatorByte)
+	}
 
 	if len(labelKeys) > 0 {
 		// Create indices [0, 1, 2, ...]
