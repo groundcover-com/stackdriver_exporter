@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -563,25 +564,34 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 		}
 
 		// By default only the newest point is reported. In return-all-points mode every point in the
-		// interval is reported, each stamped with its own end time.
-		pointsToReport := []*monitoring.Point{newestTSPoint}
+		// interval is reported, each stamped with its own end time, ordered oldest-first so DELTA
+		// aggregation (which only accumulates strictly-newer samples) sums them in chronological order.
+		type reportPoint struct {
+			point   *monitoring.Point
+			endTime time.Time
+		}
+		var pointsToReport []reportPoint
 		if c.returnAllPoints {
-			pointsToReport = timeSeries.Points
+			for _, p := range timeSeries.Points {
+				if p == nil {
+					continue
+				}
+				endTime, err := time.Parse(time.RFC3339Nano, p.Interval.EndTime)
+				if err != nil {
+					return fmt.Errorf("Error parsing TimeSeries Point interval end time `%s`: %s", p.Interval.EndTime, err)
+				}
+				pointsToReport = append(pointsToReport, reportPoint{p, endTime})
+			}
+			sort.Slice(pointsToReport, func(i, j int) bool {
+				return pointsToReport[i].endTime.Before(pointsToReport[j].endTime)
+			})
+		} else if newestTSPoint != nil {
+			pointsToReport = []reportPoint{{newestTSPoint, newestEndTime}}
 		}
 
-		for _, tsPoint := range pointsToReport {
-			if tsPoint == nil {
-				continue
-			}
-
-			pointEndTime := newestEndTime
-			if c.returnAllPoints {
-				parsed, err := time.Parse(time.RFC3339Nano, tsPoint.Interval.EndTime)
-				if err != nil {
-					return fmt.Errorf("Error parsing TimeSeries Point interval end time `%s`: %s", tsPoint.Interval.EndTime, err)
-				}
-				pointEndTime = parsed
-			}
+		for _, rp := range pointsToReport {
+			tsPoint := rp.point
+			pointEndTime := rp.endTime
 
 			// Check for duplicate metrics using deduplicator
 			if c.deduplicator.CheckAndMark(timeSeries.Metric.Type, labelKeys, labelValues, pointEndTime) {
