@@ -59,6 +59,24 @@ func TestMetricDeduplicator_CheckAndMark(t *testing.T) {
 	assert.False(t, isDuplicate, "Call with different metric name should not be a duplicate")
 }
 
+func TestMetricDeduplicator_IncludeTimestamp(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	dedup := NewMetricDeduplicator(logger, "test_project")
+	dedup.includeTimestamp = true // return-all-points mode
+
+	fqName := "test_metric"
+	labelKeys := []string{"label1", "label2"}
+	labelValues := []string{"value1", "value2"}
+	ts := time.Now()
+
+	// First point: not a duplicate.
+	assert.False(t, dedup.CheckAndMark(fqName, labelKeys, labelValues, ts))
+	// Same labels, same timestamp: duplicate.
+	assert.True(t, dedup.CheckAndMark(fqName, labelKeys, labelValues, ts))
+	// Same labels, different timestamp: NOT a duplicate when timestamp is included.
+	assert.False(t, dedup.CheckAndMark(fqName, labelKeys, labelValues, ts.Add(time.Second)))
+}
+
 func TestMetricDeduplicator_LabelOrdering(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	dedup := NewMetricDeduplicator(logger, "test_project")

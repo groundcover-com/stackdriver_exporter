@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +62,7 @@ type MonitoringCollector struct {
 	descriptorCache                 DescriptorCache
 	enableSystemLabels              bool
 	userLabelsOverride              bool
+	returnAllPoints                 bool
 	deduplicator                    *MetricDeduplicator
 
 	// Metrics for tracking dropped data
@@ -96,6 +98,9 @@ type MonitoringCollectorOptions struct {
 	EnableSystemLabels bool
 	// UserLabelsOverride decides if user labels should override any conflicting labels
 	UserLabelsOverride bool
+	// ReturnAllPoints decides if every data point in the requested interval is reported (each stamped with its
+	// own end time) instead of only the most recent one.
+	ReturnAllPoints bool
 }
 
 func isGoogleMetric(name string) bool {
@@ -240,9 +245,13 @@ func NewMonitoringCollector(projectID string, monitoringService *monitoring.Serv
 		descriptorCache:                 descriptorCache,
 		enableSystemLabels:              opts.EnableSystemLabels,
 		userLabelsOverride:              opts.UserLabelsOverride,
+		returnAllPoints:                 opts.ReturnAllPoints,
 		deduplicator:                    NewMetricDeduplicator(logger, projectID),
 		droppedMetricsTotal:             droppedMetricsTotal,
 	}
+	// In return-all-points mode a series' points share labels and differ only by time, so the
+	// deduplicator must include the timestamp to avoid collapsing them into one.
+	monitoringCollector.deduplicator.includeTimestamp = opts.ReturnAllPoints
 
 	return monitoringCollector, nil
 }
@@ -554,61 +563,92 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 			continue
 		}
 
-		// Check for duplicate metrics using deduplicator
-		if c.deduplicator.CheckAndMark(timeSeries.Metric.Type, labelKeys, labelValues, newestEndTime) {
-			continue // Duplicate detected and logged by deduplicator
+		// By default only the newest point is reported. In return-all-points mode every point in the
+		// interval is reported, each stamped with its own end time, ordered oldest-first so DELTA
+		// aggregation (which only accumulates strictly-newer samples) sums them in chronological order.
+		type reportPoint struct {
+			point   *monitoring.Point
+			endTime time.Time
+		}
+		var pointsToReport []reportPoint
+		if c.returnAllPoints {
+			for _, p := range timeSeries.Points {
+				if p == nil {
+					continue
+				}
+				endTime, err := time.Parse(time.RFC3339Nano, p.Interval.EndTime)
+				if err != nil {
+					return fmt.Errorf("Error parsing TimeSeries Point interval end time `%s`: %s", p.Interval.EndTime, err)
+				}
+				pointsToReport = append(pointsToReport, reportPoint{p, endTime})
+			}
+			sort.Slice(pointsToReport, func(i, j int) bool {
+				return pointsToReport[i].endTime.Before(pointsToReport[j].endTime)
+			})
+		} else if newestTSPoint != nil {
+			pointsToReport = []reportPoint{{newestTSPoint, newestEndTime}}
 		}
 
-		switch timeSeries.ValueType {
-		case "BOOL":
-			metricValue = 0
-			if *newestTSPoint.Value.BoolValue {
-				metricValue = 1
-			}
-		case "INT64":
-			metricValue = float64(*newestTSPoint.Value.Int64Value)
-		case "DOUBLE":
-			metricValue = *newestTSPoint.Value.DoubleValue
-		case "DISTRIBUTION":
-			dist := newestTSPoint.Value.DistributionValue
-			buckets, err := c.generateHistogramBuckets(dist)
+		for _, rp := range pointsToReport {
+			tsPoint := rp.point
+			pointEndTime := rp.endTime
 
-			if err == nil {
-				timeSeriesMetrics.CollectNewConstHistogram(timeSeries, newestEndTime, labelKeys, dist, buckets, labelValues, timeSeries.MetricKind)
-			} else {
-				c.deduplicator.RevertMark(timeSeries.Metric.Type, labelKeys, labelValues, newestEndTime)
+			// Check for duplicate metrics using deduplicator
+			if c.deduplicator.CheckAndMark(timeSeries.Metric.Type, labelKeys, labelValues, pointEndTime) {
+				continue // Duplicate detected and logged by deduplicator
+			}
+
+			switch timeSeries.ValueType {
+			case "BOOL":
+				metricValue = 0
+				if *tsPoint.Value.BoolValue {
+					metricValue = 1
+				}
+			case "INT64":
+				metricValue = float64(*tsPoint.Value.Int64Value)
+			case "DOUBLE":
+				metricValue = *tsPoint.Value.DoubleValue
+			case "DISTRIBUTION":
+				dist := tsPoint.Value.DistributionValue
+				buckets, err := c.generateHistogramBuckets(dist)
+
+				if err == nil {
+					timeSeriesMetrics.CollectNewConstHistogram(timeSeries, pointEndTime, labelKeys, dist, buckets, labelValues, timeSeries.MetricKind)
+				} else {
+					c.deduplicator.RevertMark(timeSeries.Metric.Type, labelKeys, labelValues, pointEndTime)
+					c.droppedMetricsTotal.WithLabelValues(
+						"distribution_bucket_error",
+						timeSeries.Metric.Type,
+						timeSeries.Resource.Type,
+						timeSeries.MetricKind,
+						timeSeries.ValueType,
+					).Inc()
+					c.logger.Warn("dropping distribution metric due to bucket error",
+						"metric", timeSeries.Metric.Type,
+						"resource_type", timeSeries.Resource.Type,
+						"metric_kind", timeSeries.MetricKind,
+						"err", err)
+				}
+				continue
+			default:
+				c.deduplicator.RevertMark(timeSeries.Metric.Type, labelKeys, labelValues, pointEndTime)
 				c.droppedMetricsTotal.WithLabelValues(
-					"distribution_bucket_error",
+					"unknown_value_type",
 					timeSeries.Metric.Type,
 					timeSeries.Resource.Type,
 					timeSeries.MetricKind,
 					timeSeries.ValueType,
 				).Inc()
-				c.logger.Warn("dropping distribution metric due to bucket error",
+				c.logger.Warn("dropping metric with unknown value type",
 					"metric", timeSeries.Metric.Type,
 					"resource_type", timeSeries.Resource.Type,
 					"metric_kind", timeSeries.MetricKind,
-					"err", err)
+					"value_type", timeSeries.ValueType)
+				continue
 			}
-			continue
-		default:
-			c.deduplicator.RevertMark(timeSeries.Metric.Type, labelKeys, labelValues, newestEndTime)
-			c.droppedMetricsTotal.WithLabelValues(
-				"unknown_value_type",
-				timeSeries.Metric.Type,
-				timeSeries.Resource.Type,
-				timeSeries.MetricKind,
-				timeSeries.ValueType,
-			).Inc()
-			c.logger.Warn("dropping metric with unknown value type",
-				"metric", timeSeries.Metric.Type,
-				"resource_type", timeSeries.Resource.Type,
-				"metric_kind", timeSeries.MetricKind,
-				"value_type", timeSeries.ValueType)
-			continue
-		}
 
-		timeSeriesMetrics.CollectNewConstMetric(timeSeries, newestEndTime, labelKeys, metricValueType, metricValue, labelValues, timeSeries.MetricKind)
+			timeSeriesMetrics.CollectNewConstMetric(timeSeries, pointEndTime, labelKeys, metricValueType, metricValue, labelValues, timeSeries.MetricKind)
+		}
 	}
 	timeSeriesMetrics.Complete(begun)
 	return nil
