@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,37 @@ import (
 )
 
 const namespace = "stackdriver"
+
+const retryMaxAttempts = 3
+
+// Test-overridable; treated as constants in production code.
+var (
+	retryBaseBackoff = 1 * time.Second
+	retryMaxBackoff  = 5 * time.Second
+)
+
+func isTransientAPIError(err error) bool {
+	var apiErr *googleapi.Error
+	return errors.As(err, &apiErr) && (apiErr.Code == 429 || apiErr.Code >= 500)
+}
+
+func retryOnTransient(ctx context.Context, logger *slog.Logger, fn func() error) error {
+	backoff := retryBaseBackoff
+	for attempt := 1; ; attempt++ {
+		err := fn()
+		if err == nil || attempt == retryMaxAttempts || !isTransientAPIError(err) {
+			return err
+		}
+		wait := backoff/2 + rand.N(backoff)
+		logger.Warn("retrying Google Stackdriver Monitoring API call after transient error", "attempt", attempt, "backoff", wait, "err", err)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(wait):
+		}
+		backoff = min(backoff*2, retryMaxBackoff)
+	}
+}
 
 type MetricFilter struct {
 	TargetedMetricPrefix string
@@ -355,7 +387,12 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 
 				for {
 					c.apiCallsTotalMetric.Inc()
-					page, err := timeSeriesListCall.Do()
+					var page *monitoring.ListTimeSeriesResponse
+					err := retryOnTransient(context.Background(), c.logger, func() error {
+						var err error
+						page, err = timeSeriesListCall.Do()
+						return err
+					})
 					if err != nil {
 						c.logger.Error("error retrieving Time Series metrics for descriptor", "descriptor", metricDescriptor.Type, "err", err)
 						errChannel <- err
@@ -415,10 +452,28 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 				}
 
 				c.logger.Debug("listing Google Stackdriver Monitoring metric descriptors starting with", "prefix", metricsTypePrefix)
-				if err := c.monitoringService.Projects.MetricDescriptors.List(utils.ProjectResource(c.projectID)).
+				listCall := c.monitoringService.Projects.MetricDescriptors.List(utils.ProjectResource(c.projectID)).
 					Filter(filter).
-					Pages(ctx, callback); err != nil {
-					errChannel <- err
+					Context(ctx)
+				pageToken := ""
+				for {
+					var page *monitoring.ListMetricDescriptorsResponse
+					err := retryOnTransient(ctx, c.logger, func() error {
+						var err error
+						page, err = listCall.PageToken(pageToken).Do()
+						return err
+					})
+					if err == nil {
+						err = callback(page)
+					}
+					if err != nil {
+						errChannel <- err
+						break
+					}
+					if page.NextPageToken == "" {
+						break
+					}
+					pageToken = page.NextPageToken
 				}
 
 				c.descriptorCache.Store(metricsTypePrefix, cache)
