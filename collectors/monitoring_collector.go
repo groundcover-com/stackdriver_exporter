@@ -124,6 +124,8 @@ type MonitoringCollectorOptions struct {
 	DescriptorCacheTTL time.Duration
 	// DescriptorCacheOnlyGoogle decides whether only google specific descriptors should be cached or all
 	DescriptorCacheOnlyGoogle bool
+	// DescriptorCache, when set, is used as-is and DescriptorCacheTTL/DescriptorCacheOnlyGoogle are ignored.
+	DescriptorCache DescriptorCache
 	// EnableSystemLabels decides if system labels from metadata should be added to metrics
 	EnableSystemLabels bool
 	// UserLabelsOverride decides if user labels should override any conflicting labels
@@ -240,7 +242,9 @@ func NewMonitoringCollector(projectID string, monitoringService *monitoring.Serv
 	)
 
 	var descriptorCache DescriptorCache
-	if opts.DescriptorCacheTTL == 0 {
+	if opts.DescriptorCache != nil {
+		descriptorCache = opts.DescriptorCache
+	} else if opts.DescriptorCacheTTL == 0 {
 		descriptorCache = &noopDescriptorCache{}
 	} else if opts.DescriptorCacheOnlyGoogle {
 		descriptorCache = &googleDescriptorCache{inner: newDescriptorCache(opts.DescriptorCacheTTL)}
@@ -456,6 +460,7 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 					Filter(filter).
 					Context(ctx)
 				pageToken := ""
+				listingComplete := false
 				for {
 					var page *monitoring.ListMetricDescriptorsResponse
 					err := retryOnTransient(ctx, c.logger, func() error {
@@ -471,12 +476,16 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 						break
 					}
 					if page.NextPageToken == "" {
+						listingComplete = true
 						break
 					}
 					pageToken = page.NextPageToken
 				}
 
-				c.descriptorCache.Store(metricsTypePrefix, cache)
+				// Never cache a partial descriptor listing.
+				if listingComplete {
+					c.descriptorCache.Store(metricsTypePrefix, cache)
+				}
 			}
 		}(metricsTypePrefix)
 	}

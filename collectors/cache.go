@@ -52,6 +52,11 @@ func newDescriptorCache(ttl time.Duration) *descriptorCache {
 	return &descriptorCache{ttl: ttl, cache: make(map[string]*descriptorCacheEntry)}
 }
 
+// NewInMemoryDescriptorCache returns an in-memory DescriptorCache whose entries expire after ttl.
+func NewInMemoryDescriptorCache(ttl time.Duration) DescriptorCache {
+	return newDescriptorCache(ttl)
+}
+
 // Lookup returns a list of MetricDescriptors if the prefix is found, nil if not found or expired
 func (d *descriptorCache) Lookup(prefix string) []*monitoring.MetricDescriptor {
 	d.lock.Lock()
